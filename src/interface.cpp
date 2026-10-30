@@ -1,176 +1,178 @@
 #include "interface.h"
 #include "game.h"
-#include "ai.h"
+#include "computer.h"
 #include "tournament.h"
 #include "statistics.h"
 #include "raylib.h"
-#include <string>
-#include <filesystem>
+#include <array>
 #include <cstdlib>
+#include <filesystem>
+#include <string>
 
-enum Screen { MENU, SETUP, GAME, STATS, RULES };
-const Color background={16,23,39,255}, panel={27,39,60,255}, accent={57,116,235,255};
-const Color ink={231,238,250,255}, muted={155,174,202,255}, cross={41,211,190,255}, circle={255,151,97,255};
-Font font;
-void text(const std::string& s,float x,float y,float size=24,Color color=ink) {
-    DrawTextEx(font,s.c_str(),{x,y},size,1,color);
+// raylib and Win32 expose several palette names as macros. The UI uses its
+// own course-project palette, so remove those macro aliases locally.
+#undef BLUE
+#undef GREEN
+#undef ORANGE
+#undef RED
+#undef TEXT
+
+enum class Screen { Menu, QuickSetup, SeriesSetup, TournamentSetup, Game, Bracket, Stats, Rules };
+enum class Mode { Quick, Series, Tournament };
+static const Color BG={16,24,39,255}, PANEL={27,41,64,255}, PANEL2={35,52,78,255};
+static const Color BLUE={79,140,255,255}, TEAL={37,214,197,255}, ORANGE={255,173,102,255};
+static const Color GREEN={53,212,154,255}, TEXT={245,247,252,255}, MUTED={170,184,204,255}, RED={242,105,112,255};
+static Font uiFont{};
+
+static void label(const std::string& s,float x,float y,float size=22,Color color=TEXT) { DrawTextEx(uiFont,s.c_str(),{x,y},size,1,color); }
+static void centered(const std::string& s,Rectangle r,float size=22,Color color=TEXT) {
+    while(size>11 && MeasureTextEx(uiFont,s.c_str(),size,1).x>r.width-18) size-=1;
+    Vector2 v=MeasureTextEx(uiFont,s.c_str(),size,1); label(s,r.x+(r.width-v.x)/2,r.y+(r.height-v.y)/2,size,color);
 }
-void fitted(const std::string& s,Rectangle r,float size,Color color=ink) {
-    while(size>10 && MeasureTextEx(font,s.c_str(),size,1).x>r.width-20) size--;
-    Vector2 m=MeasureTextEx(font,s.c_str(),size,1);
-    text(s,r.x+(r.width-m.x)/2,r.y+(r.height-size)/2,size,color);
+static bool button(const std::string& s,Rectangle r,bool selected=false,bool enabled=true) {
+    bool hover=enabled&&CheckCollisionPointRec(GetMousePosition(),r);
+    DrawRectangleRounded(r,.18f,8,!enabled?Color{39,49,65,255}:hover?Color{66,118,215,255}:selected?BLUE:PANEL2);
+    centered(s,r,20,enabled?TEXT:Color{105,116,132,255});
+    return hover&&IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
-bool button(const std::string& s,Rectangle r,bool selected=false) {
-    bool hover=CheckCollisionPointRec(GetMousePosition(),r);
-    DrawRectangleRounded(r,0.18f,8,hover?accent:(selected?Color{46,80,139,255}:panel));
-    fitted(s,r,23);
-    return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-}
-void input(std::string& value,Rectangle r,bool active) {
-    DrawRectangleRounded(r,0.15f,8,active?Color{44,64,95,255}:panel);
-    fitted(value.empty()?"Введите имя":value,r,23,value.empty()?muted:ink);
+static void editText(std::string& value,Rectangle r,bool active,const std::string& hint) {
+    DrawRectangleRounded(r,.13f,8,active?PANEL2:PANEL); label(value.empty()?hint:value,r.x+14,r.y+13,19,value.empty()?MUTED:TEXT);
     if(!active) return;
-    int code=GetCharPressed();
-    while(code>0) {
-        if(code>=32 && code<=0x04ff && value.size()<48) { int size=0; const char* utf=CodepointToUTF8(code,&size); value.append(utf,size); }
-        code=GetCharPressed();
-    }
-    if(IsKeyPressed(KEY_BACKSPACE) && !value.empty()) {
-        int i=static_cast<int>(value.size())-1;
-        while(i>0 && (static_cast<unsigned char>(value[i])&0xc0)==0x80) i--;
-        value.erase(i);
-    }
+    for(int code=GetCharPressed();code>0;code=GetCharPressed()) if(code>=32&&code<=0x04ff&&value.size()<40) { int n=0; value.append(CodepointToUTF8(code,&n),n); }
+    if(IsKeyPressed(KEY_BACKSPACE)&&!value.empty()) { size_t p=value.size()-1; while(p>0&&(static_cast<unsigned char>(value[p])&0xc0)==0x80)--p; value.erase(p); }
 }
-std::string statisticsPath() {
+static std::filesystem::path dataDir() {
 #ifdef _WIN32
     const char* base=std::getenv("LOCALAPPDATA");
 #else
     const char* base=std::getenv("XDG_DATA_HOME");
-    if(!base) { const char* home=std::getenv("HOME"); if(home) { std::filesystem::path dir=std::filesystem::path(home)/".local/share/TicTacToe"; std::error_code ec; std::filesystem::create_directories(dir,ec); return (dir/"statistics.txt").string(); } }
+    if(!base) base=std::getenv("HOME");
 #endif
-    std::filesystem::path dir=base?std::filesystem::path(base)/"TicTacToe":std::filesystem::path(GetApplicationDirectory())/"data";
-    std::error_code ec; std::filesystem::create_directories(dir,ec); return (dir/"statistics.txt").string();
+    std::filesystem::path p=base?base:GetApplicationDirectory(); p/="TicTacToe"; std::error_code ec; std::filesystem::create_directories(p,ec); return p;
 }
+static int computerDifficulty(PlayerType type) { return type==PlayerType::Hard?2:type==PlayerType::Medium?1:0; }
+static std::string typeName(PlayerType t) { const char* n[]={"Человек","Компьютер: лёгкий","Компьютер: средний","Компьютер: сложный"}; return n[static_cast<int>(t)]; }
+static void drawMark(char mark,Rectangle cell) {
+    if(mark=='X') { DrawLineEx({cell.x+30,cell.y+30},{cell.x+cell.width-30,cell.y+cell.height-30},8,BLUE); DrawLineEx({cell.x+cell.width-30,cell.y+30},{cell.x+30,cell.y+cell.height-30},8,BLUE); }
+    else if(mark=='O') DrawRing({cell.x+cell.width/2,cell.y+cell.height/2},cell.width*.27f,cell.width*.33f,0,360,64,ORANGE);
+}
+static void drawBoard(Game& g,bool inputAllowed,Rectangle area) {
+    float gap=10, side=(area.width-gap*2)/3;
+    for(int r=0;r<3;r++) for(int c=0;c<3;c++) {
+        Rectangle cell={area.x+c*(side+gap),area.y+r*(side+gap),side,side}; bool win=false;
+        for(int k:g.line) if(k==r*3+c) win=true;
+        bool hover=inputAllowed&&g.board[r][c]==' '&&CheckCollisionPointRec(GetMousePosition(),cell);
+        DrawRectangleRounded(cell,.12f,8,win?Color{35,91,83,255}:hover?Color{42,63,94,255}:PANEL);
+        if(hover&&IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) play(g,r,c);
+        drawMark(g.board[r][c],cell);
+    }
+}
+static std::string participantName(const Championship& c,int i) { return i<0?"Ожидание победителя":c.players[i].name; }
+static Rectangle cardRect(int i) {
+    if(i<4) return {45.0f,145.0f+i*142,300,104};
+    if(i<6) return {490.0f,216.0f+(i-4)*284,300,104};
+    return {935,358,300,104};
+}
+static void drawConnections() {
+    for(int i=0;i<4;i++) { Rectangle a=cardRect(i),b=cardRect(4+i/2); float y=a.y+a.height/2, by=b.y+b.height/2; DrawLineEx({a.x+a.width,y},{410,y},2,PANEL2); DrawLineEx({410,y},{410,by},2,PANEL2); DrawLineEx({410,by},{b.x,by},2,PANEL2); }
+    for(int i=4;i<6;i++) { Rectangle a=cardRect(i),b=cardRect(6); float y=a.y+a.height/2,by=b.y+b.height/2; DrawLineEx({a.x+a.width,y},{860,y},2,PANEL2); DrawLineEx({860,y},{860,by},2,PANEL2); DrawLineEx({860,by},{b.x,by},2,PANEL2); }
+}
+static bool drawMatchCard(const Championship& c,int i) {
+    const BracketMatch& m=c.matches[i]; Rectangle r=cardRect(i); bool current=c.currentMatch==i;
+    Color fill=m.completed?Color{27,69,61,255}:current?Color{29,65,119,255}:PANEL;
+    bool hover=m.available&&!m.completed&&CheckCollisionPointRec(GetMousePosition(),r); if(hover) fill=PANEL2;
+    DrawRectangleRounded(r,.10f,8,fill); if(current) DrawRectangleRoundedLinesEx(r,.10f,8,2,BLUE); else if(m.completed) DrawRectangleRoundedLinesEx(r,.10f,8,2,GREEN);
+    Color a=m.completed&&m.winner!=m.player[0]?MUTED:TEXT,b=m.completed&&m.winner!=m.player[1]?MUTED:TEXT;
+    label(participantName(c,m.player[0]),r.x+13,r.y+12,17,a); label(std::to_string(m.series.wins[0]),r.x+r.width-30,r.y+12,18,a);
+    label(participantName(c,m.player[1]),r.x+13,r.y+43,17,b); label(std::to_string(m.series.wins[1]),r.x+r.width-30,r.y+43,18,b);
+    label(m.completed?"Завершён":m.available?(current?"Идёт матч":"Готов к игре"):"Ожидание",r.x+13,r.y+76,13,m.completed?GREEN:current?BLUE:MUTED);
+    return hover&&IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
 int runInterface() {
-    InitWindow(1000,700,"TicTacToe"); SetTargetFPS(60); SetExitKey(KEY_NULL);
-    int codes[1200]; int count=0;
-    for(int c=32;c<=126;c++) codes[count++]=c;
-    for(int c=0x400;c<=0x4ff;c++) codes[count++]=c;
-    codes[count++]=0x2014; codes[count++]=0x2026;
-    std::string fontPath=std::string(GetApplicationDirectory())+"assets/fonts/DejaVuSans.ttf";
-    font=LoadFontEx(fontPath.c_str(),48,codes,count);
-    if(font.texture.id==0) { CloseWindow(); return 1; }
-    SetTextureFilter(font.texture,TEXTURE_FILTER_BILINEAR);
-    Screen screen=MENU; bool quit=false, computer=true, tournament=false, confirm=false;
-    int difficulty=2,target=3,active=0; char human='X';
-    std::string names[2]={"",""}, players[2];
-    Game game; resetGame(game); Tournament tour; Statistics stats;
-    std::string path=statisticsPath(); bool loaded=loadStatistics(path,stats);
-    std::string notice=loaded?"":"Статистика отсутствует или повреждена: начато с нуля.";
-    bool recorded=false; double turnStart=0;
-    while(!WindowShouldClose() && !quit) {
-        BeginDrawing(); ClearBackground(background);
-        text("КРЕСТИКИ-НОЛИКИ",50,30,34); text("C++17 / raylib / Minimax",52,76,18,muted);
-        if(screen==MENU) {
-            text("Три в ряд. Один победитель.",255,140,28);
-            const char* labels[]={"Играть","Турнир","Статистика","Правила","Выход"};
-            for(int i=0;i<5;i++) if(button(labels[i],{310.0f,210.0f+i*76,380,58})) {
-                if(i<2) { tournament=i==1; screen=SETUP; }
-                if(i==2) {screen=STATS;confirm=false;}
-                if(i==3) screen=RULES;
-                if(i==4) quit=true;
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE); InitWindow(1280,800,"Крестики-нолики"); SetWindowMinSize(1280,800);
+    // Fixed inset stays fully visible with Windows display scaling (125/150%).
+    SetWindowPosition(30,30);
+    SetTargetFPS(60); SetExitKey(KEY_NULL);
+    int codes[400]; int count=0; for(int i=32;i<=126;i++) codes[count++]=i; for(int i=0x400;i<=0x4ff;i++) codes[count++]=i; codes[count++]=0x2014; codes[count++]=0x2026;
+    std::string fp=std::string(GetApplicationDirectory())+"assets/fonts/DejaVuSans.ttf"; uiFont=LoadFontEx(fp.c_str(),48,codes,count);
+    if(uiFont.texture.id==0) { CloseWindow(); return 2; } SetTextureFilter(uiFont.texture,TEXTURE_FILTER_BILINEAR);
+    auto dir=dataDir(); Statistics stats; loadStatistics((dir/"statistics.txt").string(),stats);
+    Championship champ; bool hasSave=loadChampionship((dir/"tournament.txt").string(),champ);
+    std::array<Participant,8> setupPlayers; for(int i=0;i<8;i++) setupPlayers[i]={"Игрок "+std::to_string(i+1),PlayerType::Human};
+    Screen screen=Screen::Menu; Mode mode=Mode::Quick; Game game; resetGame(game); MatchSeries series;
+    Participant duel[2]={{"Игрок 1",PlayerType::Human},{"Компьютер: сложный",PlayerType::Hard}}; int quickX=0, target=3, activeInput=-1, matchIndex=-1;
+    bool recorded=false, confirmExit=false, running=true; double lastMove=GetTime(); std::string toast;
+    auto resetRound=[&](){ resetGame(game); recorded=false; lastMove=GetTime(); };
+    auto beginMatch=[&](int i){ if(startBracketMatch(champ,i)) { matchIndex=i; mode=Mode::Tournament; resetRound(); screen=Screen::Game; saveChampionship((dir/"tournament.txt").string(),champ); } };
+    while(running&&!WindowShouldClose()) {
+        BeginDrawing(); ClearBackground(BG);
+        label("КРЕСТИКИ-НОЛИКИ",42,24,30); label("C++17 · raylib · локальные алгоритмы",44,61,16,MUTED);
+        if(screen==Screen::Menu) {
+            label("Три в ряд. Один победитель.",390,135,30); const char* items[]={"Быстрая игра","Серия матчей","Турнирная сетка","Статистика","Правила","Выход"};
+            for(int i=0;i<6;i++) if(button(items[i],{420.0f,205.0f+i*78,440,58})) {
+                if(i==0) screen=Screen::QuickSetup; if(i==1) screen=Screen::SeriesSetup;
+                if(i==2) screen=hasSave?Screen::Bracket:Screen::TournamentSetup; if(i==3) screen=Screen::Stats; if(i==4) screen=Screen::Rules; if(i==5) running=false;
             }
-        } else if(screen==SETUP) {
-            text(tournament?"Настройка турнира":"Новая партия",60,125,30);
-            if(button("Против компьютера",{60,185,420,52},computer)) computer=true;
-            if(button("Два игрока",{510,185,420,52},!computer)) computer=false;
-            Rectangle first={60,285,420,54},second={510,285,420,54};
-            text("Первый участник",60,252,20,muted); text(computer?"Соперник: Компьютер":"Второй участник",510,252,20,muted);
-            if(IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { if(CheckCollisionPointRec(GetMousePosition(),first)) active=0; if(CheckCollisionPointRec(GetMousePosition(),second)) active=1; }
-            input(names[0],first,active==0); if(!computer) input(names[1],second,active==1);
-            if(computer) {
-                const char* levels[]={"Лёгкий","Средний","Сложный"};
-                for(int i=0;i<3;i++) if(button(levels[i],{60.0f+i*295,370,275,52},difficulty==i)) difficulty=i;
+        } else if(screen==Screen::QuickSetup||screen==Screen::SeriesSetup) {
+            bool isSeries=screen==Screen::SeriesSetup; label(isSeries?"СЕРИЯ МАТЧЕЙ":"БЫСТРАЯ ИГРА",55,115,28);
+            for(int p=0;p<2;p++) { label("Участник "+std::to_string(p+1),80+p*590,175,18,MUTED); Rectangle ir={80.0f+p*590,208,530,50};
+                if(IsMouseButtonPressed(MOUSE_BUTTON_LEFT)&&CheckCollisionPointRec(GetMousePosition(),ir)) activeInput=p;
+                editText(duel[p].name,ir,activeInput==p,"Введите имя");
+                for(int t=0;t<4;t++) if(button(typeName(static_cast<PlayerType>(t)),{80.0f+p*590,280.0f+t*58,530,45},duel[p].type==static_cast<PlayerType>(t))) { duel[p].type=static_cast<PlayerType>(t); if(t) duel[p].name=typeName(duel[p].type); }
             }
-            if(tournament) {
-                text("Серия до побед (участники меняют X/O)",60,450,22,muted);
-                for(int i=0;i<3;i++) if(button(std::to_string(3+2*i),{60.0f+i*295,490,275,52},target==3+2*i)) target=3+2*i;
-            } else if(computer) {
-                if(button("Играть за X",{60,475,420,52},human=='X')) human='X';
-                if(button("Играть за O",{510,475,420,52},human=='O')) human='O';
+            if(!isSeries) { label("Кто играет за X",80,535,18,MUTED); if(button("Участник 1",{80,568,250,48},quickX==0)) quickX=0; if(button("Участник 2",{350,568,250,48},quickX==1)) quickX=1; }
+            else { label("До скольких побед",80,535,18,MUTED); int ts[]={3,5,7}; for(int i=0;i<3;i++) if(button(std::to_string(ts[i]),{80.0f+i*175,568,155,48},target==ts[i])) target=ts[i]; }
+            if(button("Назад",{80,680,250,55})) screen=Screen::Menu;
+            if(button("Начать",{950,680,250,55})) { if(duel[0].name.empty()) duel[0].name="Игрок 1"; if(duel[1].name.empty()) duel[1].name="Игрок 2"; mode=isSeries?Mode::Series:Mode::Quick; if(isSeries) resetSeries(series,target); resetRound(); screen=Screen::Game; }
+        } else if(screen==Screen::TournamentSetup) {
+            label("СОЗДАНИЕ ТУРНИРА",42,104,27); label("Нажмите тип, чтобы переключить уровень компьютерного соперника",42,142,17,MUTED);
+            for(int i=0;i<8;i++) { float x=i<4?55:660,y=190+(i%4)*100; Rectangle ir={x,y,390,42};
+                if(IsMouseButtonPressed(MOUSE_BUTTON_LEFT)&&CheckCollisionPointRec(GetMousePosition(),ir)) activeInput=i;
+                editText(setupPlayers[i].name,ir,activeInput==i,"Имя участника");
+                if(button(typeName(setupPlayers[i].type),{x+410,y,150,42})) { int t=(static_cast<int>(setupPlayers[i].type)+1)%4; setupPlayers[i].type=static_cast<PlayerType>(t); if(t) setupPlayers[i].name=typeName(setupPlayers[i].type)+" "+std::to_string(i+1); }
             }
-            if(button("Начать",{510,590,420,58})) {
-                players[0]=names[0].empty()?"Игрок 1":names[0]; players[1]=computer?"Компьютер":(names[1].empty()?"Игрок 2":names[1]);
-                resetTournament(tour,target); resetGame(game); recorded=false; turnStart=GetTime(); screen=GAME;
-            }
-            if(button("В меню",{60,590,420,58})) screen=MENU;
-        } else if(screen==GAME) {
-            int xPlayer=tournament?tour.xPlayer:(computer && human=='O'?1:0);
-            char computerSymbol=xPlayer==1?'X':'O';
-            bool aiTurn=computer && game.turn==computerSymbol && game.result==' ';
-            if(aiTurn && GetTime()-turnStart>=0.4) {
-                Move m=chooseMove(game.board,computerSymbol,difficulty); play(game,m.row,m.column); turnStart=GetTime();
-            }
-            for(int r=0;r<3;r++) for(int c=0;c<3;c++) {
-                Rectangle cell={60.0f+c*146,160.0f+r*146,136,136}; bool win=false;
-                for(int k=0;k<3;k++) if(game.line[k]==r*3+c) win=true;
-                DrawRectangleRounded(cell,0.12f,6,win?Color{42,88,93,255}:panel);
-                if(!aiTurn && CheckCollisionPointRec(GetMousePosition(),cell) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                    if(play(game,r,c)) turnStart=GetTime();
-                }
-                float x=cell.x,y=cell.y;
-                if(game.board[r][c]=='X') {DrawLineEx({x+35,y+35},{x+101,y+101},7,cross); DrawLineEx({x+101,y+35},{x+35,y+101},7,cross);}
-                if(game.board[r][c]=='O') DrawRing({x+68,y+68},40,47,0,360,60,circle);
-            }
-            if(game.result!=' ' && !recorded) {
-                recorded=true;
-                int winner=game.result=='D'?-1:(game.result=='X'?xPlayer:1-xPlayer);
-                if(tournament) {
-                    recordRound(tour,game.result);
-                    if(tour.finished) {stats.tournaments++; if(computer) {if(tour.wins[0]>=target) stats.tournamentWins++; else stats.tournamentLosses++;}}
-                } else { stats.games++; if(computer) {if(winner<0) stats.draws++; else if(winner==0) stats.wins++; else stats.losses++;} }
-                if(!saveStatistics(path,stats)) notice="Не удалось сохранить статистику.";
-            }
-            fitted(players[xPlayer]+" — X",{530,155,420,50},26,cross);
-            fitted(players[1-xPlayer]+" — O",{530,210,420,50},26,circle);
-            if(tournament) {
-                text("До "+std::to_string(target)+" побед",550,280,24);
-                text("Счёт: "+std::to_string(tour.wins[0])+" : "+std::to_string(tour.wins[1]),550,320,28);
-                text("Ничьих: "+std::to_string(tour.draws),550,362,22,muted);
-                text("Партия № "+std::to_string(tour.games+(recorded?0:1)),550,397,22,muted);
-            }
-            std::string status;
-            if(game.result==' ') status=aiTurn?"Компьютер думает…":"Ход: "+players[game.turn=='X'?xPlayer:1-xPlayer];
-            else if(game.result=='D') status="Ничья!";
-            else status="Победил: "+players[game.result=='X'?xPlayer:1-xPlayer];
-            if(tournament && tour.finished) status="Победитель турнира: "+players[tour.wins[0]>=target?0:1];
-            fitted(status,{525,450,430,65},26);
-            if(!tournament || game.result!=' ') {
-                std::string label=tournament?(tour.finished?"Новый турнир":"Следующая партия"):"Новая игра";
-                if(button(label,{540,530,400,54})) {
-                    if(tournament && tour.finished) {screen=SETUP;}
-                    else if(!tournament || nextRound(tour)) { resetGame(game);recorded=false;turnStart=GetTime(); }
-                }
-            }
-            if(button("Главное меню",{540,605,400,54})) screen=MENU;
-        } else if(screen==STATS) {
-            text("Статистика",60,130,30);
-            std::string rows[]={"Обычных партий: "+std::to_string(stats.games),"Побед над компьютером: "+std::to_string(stats.wins),"Поражений от компьютера: "+std::to_string(stats.losses),"Ничьих с компьютером: "+std::to_string(stats.draws),"Завершено турниров: "+std::to_string(stats.tournaments),"Турниров выиграно у компьютера: "+std::to_string(stats.tournamentWins),"Турниров проиграно компьютеру: "+std::to_string(stats.tournamentLosses)};
-            for(int i=0;i<7;i++) text(rows[i],65,190.0f+i*43,24);
-            if(confirm) {
-                text("Удалить все результаты?",65,510,24,circle);
-                if(button("Да, сбросить",{60,555,420,52})) {stats=Statistics{}; notice=saveStatistics(path,stats)?"Статистика сброшена.":"Ошибка записи статистики.";confirm=false;}
-                if(button("Отмена",{510,555,420,52})) confirm=false;
-            } else if(button("Сбросить статистику",{60,555,420,52})) confirm=true;
-            if(button("В меню",{510,620,420,48})) {screen=MENU;confirm=false;}
-        } else if(screen==RULES) {
-            text("Правила игры",60,130,30);
-            const char* rules[]={"X ходит первым. Затем участники ходят по очереди.","Нажмите свободную клетку, чтобы поставить символ.","Три символа в строке, столбце или по диагонали — победа.","Если поле заполнено без победителя — ничья.","Лёгкий: случайный ход. Средний: победа, защита, центр.","Сложный: Minimax перебирает продолжения и не проигрывает.","Турнир идёт до 3, 5 или 7 побед. Ничьи не дают побед.","После каждой партии турнира участники меняются X и O.","Статистика партий и завершённых турниров хранится отдельно."};
-            for(int i=0;i<9;i++) fitted(rules[i],{50,190.0f+i*40,900,36},22);
-            if(button("В меню",{310,600,380,58})) screen=MENU;
+            label("Побед в противостоянии:",55,615,18,MUTED); int ts[]={1,3,5}; for(int i=0;i<3;i++) if(button(std::to_string(ts[i]),{300.0f+i*90,600,75,45},target==ts[i])) target=ts[i];
+            if(button("Главное меню",{55,690,260,52})) screen=Screen::Menu;
+            if(button("Создать турнир",{930,690,295,52})) { for(int i=0;i<8;i++) if(setupPlayers[i].name.empty()) setupPlayers[i].name="Игрок "+std::to_string(i+1); createChampionship(champ,setupPlayers,target); hasSave=true; saveChampionship((dir/"tournament.txt").string(),champ); screen=Screen::Bracket; }
+        } else if(screen==Screen::Bracket) {
+            label("ТУРНИРНАЯ СЕТКА",42,98,27); label("ЧЕТВЕРТЬФИНАЛ",80,122,16,MUTED); label("ПОЛУФИНАЛ",570,122,16,MUTED); label("ФИНАЛ",1050,122,16,MUTED);
+            drawConnections(); int clicked=-1; for(int i=0;i<7;i++) if(drawMatchCard(champ,i)) clicked=i;
+            if(clicked>=0) beginMatch(clicked); if(champ.champion>=0) { Rectangle cr={850,520,375,78}; DrawRectangleRounded(cr,.12f,8,Color{27,78,66,255}); centered("ЧЕМПИОН: "+champ.players[champ.champion].name,cr,22,GREEN); }
+            int next=nextAvailableMatch(champ); if(next>=0&&button("Начать следующий матч",{470,680,340,52})) beginMatch(next);
+            if(champ.currentMatch>=0&&button("Вернуться к матчу",{470,680,340,52})) { matchIndex=champ.currentMatch; mode=Mode::Tournament; screen=Screen::Game; }
+            if(button("Новый турнир",{42,680,250,52})) { hasSave=false; screen=Screen::TournamentSetup; }
+            if(button("Главное меню",{980,680,250,52})) { confirmExit=true; }
+        } else if(screen==Screen::Game) {
+            Participant* p=duel; MatchSeries* s=mode==Mode::Series?&series:nullptr; int xSide=quickX;
+            if(mode==Mode::Series) xSide=series.xPlayer;
+            if(mode==Mode::Tournament) { BracketMatch& m=champ.matches[matchIndex]; duel[0]=champ.players[m.player[0]]; duel[1]=champ.players[m.player[1]]; p=duel; s=&m.series; xSide=m.series.xPlayer; }
+            int turnSide=game.turn=='X'?xSide:1-xSide; bool computerTurn=p[turnSide].type!=PlayerType::Human&&game.result==' ';
+            if(computerTurn&&GetTime()-lastMove>.55) { Move m=getComputerMove(game.board,computerDifficulty(p[turnSide].type),game.turn,other(game.turn)); if(play(game,m.row,m.column)) lastMove=GetTime(); }
+            drawBoard(game,!computerTurn&&game.result==' ',{75,170,450,450});
+            label(p[xSide].name+"  —  X",610,175,25,BLUE); label(p[1-xSide].name+"  —  O",610,220,25,ORANGE);
+            if(s) { label("Счёт серии: "+std::to_string(s->wins[0])+" : "+std::to_string(s->wins[1]),610,292,28); label("Ничьи: "+std::to_string(s->draws)+" · цель: "+std::to_string(s->target),610,332,19,MUTED); }
+            std::string status=game.result==' '?"Ход: "+p[turnSide].name:game.result=='D'?"Ничья":"Победил: "+p[game.result=='X'?xSide:1-xSide].name;
+            if(s&&s->finished) status="Серия выиграна: "+p[seriesWinner(*s)].name; label(status,610,400,25,game.result==' '?TEXT:GREEN);
+            if(game.result!=' '&&!recorded) { recorded=true; if(mode==Mode::Tournament) { recordBracketGame(champ,matchIndex,game.result); if(matchIndex==6&&champ.champion>=0) { ++stats.tournaments; saveStatistics((dir/"statistics.txt").string(),stats); } saveChampionship((dir/"tournament.txt").string(),champ); }
+                else if(mode==Mode::Series) recordGame(series,game.result); else { stats.games++; if(game.result=='D') stats.draws++; else if((game.result=='X'?xSide:1-xSide)==0) stats.wins++; else stats.losses++; saveStatistics((dir/"statistics.txt").string(),stats); } }
+            if(game.result!=' ') { bool done=s&&s->finished; if(!done&&button(s?"Следующая партия":"Новая партия",{610,480,330,52})) { if(s) { if(mode==Mode::Tournament) nextBracketGame(champ,matchIndex); else prepareNextGame(series); } resetRound(); }
+                if(done&&button(mode==Mode::Tournament?"К сетке":"Завершить серию",{610,480,330,52})) screen=mode==Mode::Tournament?Screen::Bracket:Screen::Menu; }
+            if(mode==Mode::Tournament&&button("Посмотреть сетку",{610,550,330,52})) screen=Screen::Bracket;
+            if(mode!=Mode::Tournament&&button("Главное меню",{610,620,330,52})) screen=Screen::Menu;
+        } else if(screen==Screen::Stats) {
+            label("СТАТИСТИКА",55,120,28); std::string rows[]={"Всего быстрых партий: "+std::to_string(stats.games),"Побед участника 1: "+std::to_string(stats.wins),"Поражений участника 1: "+std::to_string(stats.losses),"Ничьих: "+std::to_string(stats.draws),"Завершено турниров: "+std::to_string(stats.tournaments)};
+            for(int i=0;i<5;i++) { DrawRectangleRounded({55,175.0f+i*72,650,54},.12f,8,PANEL); label(rows[i],80,190.0f+i*72,20); }
+            if(button("Сбросить",{55,560,250,52})) { stats=Statistics{}; saveStatistics((dir/"statistics.txt").string(),stats); toast="Статистика сброшена"; }
+            if(button("В меню",{55,640,250,52})) screen=Screen::Menu;
+        } else if(screen==Screen::Rules) {
+            label("ПРАВИЛА И АЛГОРИТМЫ",55,115,28); const char* r[]={"X всегда ходит первым. Побеждают три одинаковых символа в ряд.","Лёгкий компьютер выбирает случайную свободную клетку.","Средний сначала выигрывает, блокирует угрозу, занимает центр или ходит случайно.","Сложный использует оптимальный Minimax и при корректной игре не проигрывает.","В серии ничьи учитываются отдельно, а X меняется после каждой партии.","В сетке победители реально сыгранных серий переходят в следующий раунд."};
+            for(int i=0;i<6;i++) { DrawRectangleRounded({55,175.0f+i*70,1165,52},.08f,8,PANEL); label(r[i],75,190.0f+i*70,18); }
+            if(button("В меню",{55,650,250,52})) screen=Screen::Menu;
         }
-        if(!notice.empty() && screen!=GAME) fitted(notice,{40,675,920,20},14,muted);
+        if(confirmExit) { DrawRectangle(0,0,GetScreenWidth(),GetScreenHeight(),Color{0,0,0,170}); Rectangle box={390,270,500,230}; DrawRectangleRounded(box,.08f,8,PANEL); centered("Турнир сохранён. Выйти в меню?",{410,300,460,60},22); if(button("Выйти",{430,410,190,50})) { screen=Screen::Menu; confirmExit=false; } if(button("Остаться",{660,410,190,50})) confirmExit=false; }
+        if(!toast.empty()) label(toast,900,755,15,MUTED);
         EndDrawing();
     }
-    UnloadFont(font); CloseWindow(); return 0;
+    UnloadFont(uiFont); CloseWindow(); return 0;
 }

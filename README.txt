@@ -1,3 +1,7 @@
-TicTacToe — игра «Крестики-нолики».
-Запускайте TicTacToe.exe из этой папки вместе с каталогом assets.
-Статистика хранится в LOCALAPPDATA\TicTacToe\statistics.txt.
+КРЕСТИКИ-НОЛИКИ
+
+Запускайте TicTacToe.exe, не отделяя его от папки assets.
+CLion и доступ к интернету для запуска не нужны.
+
+Сохранения находятся в %LOCALAPPDATA%\TicTacToe.
+Подробная документация находится в README.md исходного проекта.
