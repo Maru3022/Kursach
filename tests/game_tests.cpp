@@ -41,7 +41,9 @@ static void testMedium(){
     resetGame(g);g.board[0][0]=g.board[0][1]='X';m=getMediumMove(g.board,'O','X');check(m.row==0&&m.column==2,"Medium blocks");
     resetGame(g);g.board[0][0]=g.board[0][1]='O';g.board[1][0]=g.board[1][1]='X';m=getMediumMove(g.board,'O','X');check(m.row==0&&m.column==2,"Medium win before block");
     resetGame(g);g.board[0][0]='X';m=getMediumMove(g.board,'O','X');check(m.row==1&&m.column==1,"Medium center");
-    resetGame(g);g.board[1][1]='X';copyBoard(g.board,before);m=getMediumMove(g.board,'O','X');check(m.row>=0&&g.board[m.row][m.column]==' ',"Medium fallback legal");unchanged(before,g.board,"Medium preserves board");
+    resetGame(g);g.board[0][0]=g.board[2][2]='O';g.board[1][1]='X';m=getMediumMove(g.board,'O','X');check((m.row==0&&m.column==2)||(m.row==2&&m.column==0),"Medium creates fork");
+    resetGame(g);g.board[0][0]=g.board[2][2]='X';g.board[1][1]='O';m=getMediumMove(g.board,'O','X');check((m.row+m.column)%2==1,"Medium blocks opposite-corner forks with side");
+    resetGame(g);g.board[1][1]='X';g.board[0][0]='O';copyBoard(g.board,before);m=getMediumMove(g.board,'O','X');check(m.row>=0&&g.board[m.row][m.column]==' ',"Medium positional fallback legal");unchanged(before,g.board,"Medium preserves board");
 }
 static void testHard(){
     Game g;char before[3][3];resetGame(g);g.board[0][0]=g.board[0][1]='X';copyBoard(g.board,before);Move m=getBestMove(g.board,'X','O');check(m.row==0&&m.column==2,"Hard wins as X");unchanged(before,g.board,"Hard preserves board");
@@ -52,6 +54,7 @@ static void testHard(){
 }
 static void testComputerMatches(){
     for(int x=0;x<3;x++)for(int o=0;o<3;o++){Game g;resetGame(g);int moves=0;while(g.result==' '){int d=g.turn=='X'?x:o;Move m=getComputerMove(g.board,d,g.turn,other(g.turn));check(play(g,m.row,m.column),"computer match legal");check(++moves<=9,"computer match terminates");}}
+    for(char hardSymbol:{'X','O'}){Game g;resetGame(g);while(g.result==' '){int d=g.turn==hardSymbol?static_cast<int>(Difficulty::Hard):static_cast<int>(Difficulty::Medium);Move m=getComputerMove(g.board,d,g.turn,other(g.turn));check(play(g,m.row,m.column),"Hard versus Medium legal");}check(g.result!=other(hardSymbol),"Medium never outperforms Hard");}
 }
 static void testTournamentAndFiles(){
     for(int target:{1,3,5}){MatchSeries s;resetSeries(s,target);for(int i=0;i<target;i++){check(recordGame(s,s.xPlayer==0?'X':'O'),"series result");check(!recordGame(s,'D'),"series no double count");if(i+1<target)check(prepareNextGame(s),"X alternates");}check(s.finished&&seriesWinner(s)==0&&s.wins[0]==target,"target reached");}
